@@ -67,8 +67,8 @@ main = do
     let base = unionVersioned (updateCellVersion 1) compareCells original Leaf
 
         derived =
-          subtractVersioned (updateCellVersion 2) compareCells deleted
-          (unionVersioned (updateCellVersion 2) compareCells added base) in
+          unionVersioned (updateCellVersion 2) compareCells added
+          (subtractVersioned (updateCellVersion 2) compareCells deleted base) in
 
     diffVersioned cellVersionsEqual compareCells base derived
     == diff compareCells base derived
