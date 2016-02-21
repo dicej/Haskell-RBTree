@@ -1,4 +1,4 @@
--- 
+--
 -- Module : RBTree
 -- Author : Wu Xingbo
 -- Copyright (c) 2010, 2011 Wu Xingbo (wuxb45@gmail.com)
@@ -14,12 +14,18 @@ module Data.Tree.RBTree (
   -- * Interval Types
   Interval (Interval), RealOrd (PInfinity, NInfinity, RealValue),
   -- * Insertion
-  (<</), insert, insertOrd, insertOrdList,
+  (<</), insert, insertOrd, insertOrdList, insertVersioned, unionVersioned,
+  union,
   -- * Delete
-  (<<\), delete, deleteOrd, deleteOrdList,
+  (<<\), delete, deleteOrd, deleteOrdList, deleteVersioned, subtractVersioned,
+  intersectVersioned, rbSubtract, intersect,
   -- * Search
   (<<?), search, searchOrd, searchFast, searchMax, searchMin,
   searchInterval, searchIntervalOrd,
+  -- * Conversion
+  toList, fromList,
+  -- * Difference
+  diffVersioned, diff,
   -- * Verification
   vD, vR
 )
@@ -29,9 +35,9 @@ import Control.Monad(liftM2)
 
 -- |Color of a 'Node'.
 --  Leaf is assumed to be Black.
-data Color = 
+data Color =
     Red
-  | Black 
+  | Black
   deriving (Eq)
 
 -- |Basic RBTree Structure.
@@ -52,7 +58,7 @@ type Path a = [Step a]
 --  Current Node can start from any node inside the tree, with a Path back to Root node.
 --  RBZip is equivalent to RBTree in Logic.
 --  All RBZip can be convert to a RBTree by Trace back to Root point.
-data RBZip a = 
+data RBZip a =
   RBZip !(RBTree a) !(Path a)  -- ^ RBZip sub-tree path
   deriving (Show)
 
@@ -60,7 +66,7 @@ data RBZip a =
 data Interval a = Interval (RealOrd a, RealOrd a)
 
 -- |Interval value from -INF to +INF.
-data RealOrd a = 
+data RealOrd a =
     PInfinity  -- ^positive infinity
   | NInfinity  -- ^positive infinity
   | RealValue a  -- ^Normal value, not need to be Ord.
@@ -111,16 +117,16 @@ toZip :: RBTree a -> RBZip a
 toZip t = RBZip t []
 
 -- |convert a zip to tree.
-toTree :: RBZip a -> RBTree a
-toTree z = tree
-    where (RBZip tree _) = topMostZip z
+toTree :: (a -> a) -> RBZip a -> RBTree a
+toTree updateVersion z = tree
+    where (RBZip tree _) = topMostZip updateVersion z
 
 -- |Zip up.
-topMostZip :: RBZip a -> RBZip a
-topMostZip (RBZip s ((Step c v d s1):path)) = case d of 
-        ToLeft -> topMostZip (RBZip (Node c v s s1) path)
-        ToRight -> topMostZip (RBZip (Node c v s1 s) path)
-topMostZip z = z
+topMostZip :: (a -> a) -> RBZip a -> RBZip a
+topMostZip updateVersion (RBZip s ((Step c v d s1):path)) = case d of
+        ToLeft -> topMostZip updateVersion (RBZip (Node c (updateVersion v) s s1) path)
+        ToRight -> topMostZip updateVersion (RBZip (Node c (updateVersion v) s1 s) path)
+topMostZip _ z = z
 
 -- |Get the Left-most non-leaf node from a Zip, or get Leaf if it is a Leaf.
 leftMostZip :: RBZip a -> RBZip a
@@ -158,7 +164,7 @@ predZip z@(RBZip (Node c v l r) path) = case lp of
   _ -> lp
   where lp = leftParentZip z
 
--- |find predecessor of a node/leaf.
+-- |find successor of a node/leaf.
 succZip :: RBZip a -> RBZip a
 succZip (RBZip (Node c v l r@(Node _ _ _ _)) path) = leftMostZip (RBZip r ((Step c v ToRight l):path))
 succZip z@(RBZip Leaf _) = case lp of
@@ -189,18 +195,31 @@ insertOrdList = foldl insertOrd
 
 -- |Insert anything.
 -- |you have to provide a compare function.
-insert :: (a -> a -> Ordering) -> RBTree a -> a ->RBTree a
-insert f t v = setBlack . toTree . insertFixup . (insertRedZip f (toZip t)) $ v
+insert :: (a -> a -> Ordering) -> RBTree a -> a -> RBTree a
+insert = insertVersioned id
+
+-- |Insert a versioned element such that the values of any nodes
+-- modified during insertion are also given updated versions.  This
+-- information can later be used to efficiently calculate the
+-- difference between two versioned trees which share structure.
+insertVersioned :: (a -> a) -> (a -> a -> Ordering) -> RBTree a -> a -> RBTree a
+insertVersioned updateVersion f t v = setBlack . toTree updateVersion . insertFixup updateVersion . (insertRedZip updateVersion f (toZip t)) $ v
 
 -- |Insert Operator for insertOrd
 (<</) :: (Ord a) => RBTree a -> a -> RBTree a
 t <</ e = insertOrd t e
 
-insertRedZip :: (a -> a -> Ordering) -> RBZip a -> a -> RBZip a
-insertRedZip _ (RBZip Leaf path) v = RBZip (Node Red v Leaf Leaf) path
-insertRedZip f (RBZip (Node c v l r) path) new
-    | f new v == GT = insertRedZip f (RBZip r ((Step c v ToRight l):path)) new
-    | otherwise     = insertRedZip f (RBZip l ((Step c v ToLeft r):path)) new
+insertRedZip :: (a -> a) -> (a -> a -> Ordering) -> RBZip a -> a -> RBZip a
+insertRedZip updateVersion _ (RBZip Leaf path) new = RBZip (Node Red (updateVersion new) Leaf Leaf) path
+insertRedZip updateVersion f (RBZip (Node c v l r) path) new =
+  case f new v of
+    GT -> insertRedZip updateVersion f (RBZip r ((Step c v ToRight l):path)) new
+    LT -> insertRedZip updateVersion f (RBZip l ((Step c v ToLeft r):path)) new
+    EQ -> RBZip (Node c (updateVersion new) l r) path
+
+updateNode :: (a -> a) -> RBTree a -> RBTree a
+updateNode updateVersion (Node color v d s) = Node color (updateVersion v) d s
+updateNode _ t = t
 
 -- insertFixup
 --
@@ -212,26 +231,26 @@ insertRedZip f (RBZip (Node c v l r) path) new
 -- dx : direction of x
 -- sx : sub-tree of x in the path
 -- sxy : sub-tree of x in y side
-insertFixup :: RBZip a -> RBZip a
-insertFixup (RBZip a@(Node Red _ _ _) ((Step Red vb db sb):(Step Black vc dc d@(Node Red _ _ _)):path)) =
-    insertFixup (RBZip newC path)
-    where newC = Node Red vc newCL newCR
+insertFixup :: (a -> a) -> RBZip a -> RBZip a
+insertFixup updateVersion (RBZip a@(Node Red _ _ _) ((Step Red vb db sb):(Step Black vc dc d@(Node Red _ _ _)):path)) =
+    insertFixup updateVersion (RBZip newC path)
+    where newC = Node Red (updateVersion vc) newCL newCR
           (newCL,newCR) = case dc of
               ToLeft -> (newB,newD)
               ToRight -> (newD,newB)
-          newB = Node Black vb newBL newBR
+          newB = Node Black (updateVersion vb) newBL newBR
           (newBL,newBR) = case db of
               ToLeft -> (a,sb)
               ToRight -> (sb,a)
-          !newD = setBlack d
-insertFixup (RBZip a@(Node Red va sal sar) ((Step Red vb db sb):(Step Black vc dc d):path)) =
+          !newD = updateNode updateVersion (setBlack d)
+insertFixup updateVersion (RBZip a@(Node Red va sal sar) ((Step Red vb db sb):(Step Black vc dc d):path)) =
     RBZip newZ (newP:path)
-    where (newZ, newP) = case (dc,db) of 
-              (ToLeft,ToLeft) -> (a,Step Black vb dc (Node Red vc sb d))
-              (ToLeft,ToRight) -> (Node Red vb sb sal, Step Black va dc (Node Red vc sar d))
-              (ToRight,ToLeft) -> (Node Red vb sar sb, Step Black va dc (Node Red vc d sal))
-              (ToRight,ToRight) -> (a,Step Black vb dc (Node Red vc d sb))
-insertFixup t = t
+    where (newZ, newP) = case (dc,db) of
+              (ToLeft,ToLeft) -> (a,Step Black vb dc (Node Red (updateVersion vc) sb d))
+              (ToLeft,ToRight) -> (Node Red (updateVersion vb) sb sal, Step Black va dc (Node Red (updateVersion vc) sar d))
+              (ToRight,ToLeft) -> (Node Red (updateVersion vb) sar sb, Step Black va dc (Node Red (updateVersion vc) d sal))
+              (ToRight,ToRight) -> (a,Step Black vb dc (Node Red (updateVersion vc) d sb))
+insertFixup _ t = t
 
 -- Search functions. return \'Just result\' on success, otherwise Nothing.
 
@@ -317,82 +336,90 @@ deleteOrd = delete compare
 
 -- |Delete a sequence of elements.
 deleteOrdList :: (Ord a) => RBTree a -> [a] -> RBTree a
-deleteOrdList = foldl deleteOrd 
+deleteOrdList = foldl deleteOrd
 
 -- |If there is no relevant element in tree, tree will be returned unmodified.
 delete :: (a -> a -> Ordering) -> RBTree a -> a -> RBTree a
-delete f t a = 
-    case searchZip f (toZip t) a of
-        Just z -> toTree . deleteZip $ z
+delete = deleteVersioned id
+
+-- |Delete a versioned element such that the values of any nodes
+-- modified during deletion are given updated versions.  This
+-- information can later be used to efficiently calculate the
+-- difference between two versioned trees which share structure.
+deleteVersioned :: (a -> a) -> (a -> a -> Ordering) -> RBTree a -> a -> RBTree a
+deleteVersioned updateVersion f t v =
+    case searchZip f (toZip t) v of
+        Just z -> toTree updateVersion . deleteZip updateVersion $ z
         Nothing -> t
 
 -- |Delete Operator for deleteOrd
 (<<\) :: (Ord a) => RBTree a -> a -> RBTree a
 t <<\ e = deleteOrd t e
 
-deleteZip :: RBZip a -> RBZip a
-deleteZip z@(RBZip Leaf _) = z
+deleteZip :: (a -> a) -> RBZip a -> RBZip a
+deleteZip _ z@(RBZip Leaf _) = z
 
 -- case 1: left null
-deleteZip (RBZip (Node c _ Leaf r) path) = case c of --r may be Leaf
+deleteZip updateVersion (RBZip (Node c _ Leaf r) path) = case c of --r may be Leaf
     Red -> RBZip r path
-    Black -> deleteFixup (RBZip r path)
+    Black -> deleteFixup updateVersion (RBZip r path)
 
 -- case 2: right null
-deleteZip (RBZip (Node c _ l Leaf) path) = case c of
+deleteZip updateVersion (RBZip (Node c _ l Leaf) path) = case c of
     Red -> RBZip l path
-    Black -> deleteFixup (RBZip l path)
+    Black -> deleteFixup updateVersion (RBZip l path)
 
 -- case 3: both not null
-deleteZip (RBZip (Node c _ l r@(Node _ vr srl _)) path) = deleteZip newX
+deleteZip updateVersion (RBZip (Node c _ l r@(Node _ vr srl _)) path) =
+  deleteZip updateVersion newX
     where !newX = leftMostZip (RBZip r ((Step c newV ToRight l):path))
           !newV = leftmostV vr srl
 
 -- |fixup.
-deleteFixup :: RBZip a -> RBZip a
+deleteFixup :: (a -> a) -> RBZip a -> RBZip a
 
 -- endcase : 'a' may be Leaf!
-deleteFixup (RBZip a@(Node Red _ _ _) path) = RBZip (setBlack a) path
+deleteFixup updateVersion (RBZip a@(Node Red _ _ _) path) = RBZip (updateNode updateVersion (setBlack a)) path
 
 -- case 1: brother of x is Red
-deleteFixup (RBZip a ((Step _ vb db (Node Red vd l r)):path)) =
-    deleteFixup $ RBZip a ((Step Red vb db newW):(Step Black vd db newS):path)
+deleteFixup updateVersion (RBZip a ((Step _ vb db (Node Red vd l r)):path)) =
+    deleteFixup updateVersion $ RBZip a ((Step Red vb db newW):(Step Black vd db newS):path)
     where (!newW, !newS) = case db of
               ToLeft -> (l,r)
               ToRight -> (r,l)
 
 -- case 4: x's brother s is black, but s's outter child is Red
 -- c may be leaf
-deleteFixup (RBZip a ((Step cb vb ToLeft (Node Black vd c e@(Node Red _ _ _))):path)) = 
-    deleteFixup . topMostZip $ RBZip (Node cb vd (Node Black vb a c) (setBlack e)) path
-deleteFixup (RBZip a ((Step cb vb ToRight (Node Black vd e@(Node Red _ _ _) c)):path)) = 
-    deleteFixup . topMostZip $ RBZip (Node cb vd (setBlack e) (Node Black vb c a)) path
+deleteFixup updateVersion (RBZip a ((Step cb vb ToLeft (Node Black vd c e@(Node Red _ _ _))):path)) =
+    deleteFixup updateVersion . topMostZip updateVersion $ RBZip (Node cb (updateVersion vd) (Node Black (updateVersion vb) a c) (updateNode updateVersion (setBlack e))) path
+deleteFixup updateVersion (RBZip a ((Step cb vb ToRight (Node Black vd e@(Node Red _ _ _) c)):path)) =
+    deleteFixup updateVersion . topMostZip updateVersion $ RBZip (Node cb (updateVersion vd) (updateNode updateVersion (setBlack e)) (Node Black (updateVersion vb) c a)) path
 
 -- case 3: x's brother s is black, but s's inner child is Red
-deleteFixup (RBZip a ((Step cb vb ToLeft (Node Black vd (Node Red vc scl scr) e)):path)) = 
-    deleteFixup $ RBZip a ((Step cb vb ToLeft (Node Black vc scl (Node Red vd scr e))):path)
-deleteFixup (RBZip a ((Step cb vb ToRight (Node Black vd e (Node Red vc scl scr))):path)) = 
-    deleteFixup $ RBZip a ((Step cb vb ToRight (Node Black vc (Node Red vd e scl) scr)):path)
+deleteFixup updateVersion (RBZip a ((Step cb vb ToLeft (Node Black vd (Node Red vc scl scr) e)):path)) =
+    deleteFixup updateVersion $ RBZip a ((Step cb vb ToLeft (Node Black (updateVersion vc) scl (Node Red (updateVersion vd) scr e))):path)
+deleteFixup updateVersion (RBZip a ((Step cb vb ToRight (Node Black vd e (Node Red vc scl scr))):path)) =
+    deleteFixup updateVersion $ RBZip a ((Step cb vb ToRight (Node Black (updateVersion vc) (Node Red (updateVersion vd) e scl) scr)):path)
 
 -- case 2: s's both children are not Red (Black or Leaf).
-deleteFixup (RBZip a ((Step cb vb db d@(Node Black _ _ _)):path)) = 
-    deleteFixup $ (RBZip (Node cb vb newL newR) path)
+deleteFixup updateVersion (RBZip a ((Step cb vb db d@(Node Black _ _ _)):path)) =
+    deleteFixup updateVersion $ (RBZip (Node cb (updateVersion vb) newL newR) path)
     where (!newL, !newR) = case db of
               ToLeft -> (a,d')
               ToRight -> (d',a)
-          !d' = setRed d
+          !d' = updateNode updateVersion (setRed d)
 
 -- any other case: set current node to black and return.
-deleteFixup (RBZip a path) = RBZip (setBlack a) path
+deleteFixup updateVersion (RBZip a path) = RBZip (updateNode updateVersion (setBlack a)) path
 
 -- Verification functions
 
--- |Verify black-depth are all the same. 
+-- |Verify black-depth are all the same.
 --  Return Just \'depth\' on success, otherwise Nothing.
 vD :: RBTree a -> Maybe Int
 vD Leaf = Just 1
-vD (Node c _ l r) = 
-    case dl == dr of 
+vD (Node c _ l r) =
+    case dl == dr of
         True -> liftM2 (+) inc dl
         False -> Nothing
     where !dl = vD l
@@ -405,8 +432,105 @@ vD (Node c _ l r) =
 vR :: RBTree a -> Bool
 vR Leaf = True
 vR (Node Black _ l r) = (vR l) && (vR r)
-vR (Node Red _ l r) = 
+vR (Node Red _ l r) =
     (cl /= Red) && (cr /= Red) && (vR l) && (vR r)
     where !cl = getColor l
           !cr = getColor r
 
+-- |Computes the difference between two versioned trees such that two
+-- nodes with equal values and equal versions are assumed to be roots
+-- of the same substructure, i.e. there are no differences at or below
+-- that node.  This makes calculating the difference between two large
+-- trees which share the majority of their structure (e.g. one is
+-- derived from the other with a relatively small number of changes)
+-- extremely fast.
+--
+-- Note that this will only work correctly if the trees have been
+-- updated using only insertVersioned and deleteVersioned.
+--
+-- The return value is a tuple \'(obsolete, new)\' where \'obsolete\'
+-- is a tree containing all elements present in the first tree but not
+-- the second tree and the \'new\' is a tree containing all the
+-- elements present in the second tree but not the first tree.
+diffVersioned :: Show a => (a -> a -> Bool) -> (a -> a -> Ordering) -> RBTree a -> RBTree a -> (RBTree a, RBTree a)
+diffVersioned versionsEqual compareValues oldTree newTree =
+  diffV oldTree newTree where
+    diffV Leaf b = (Leaf, b)
+    diffV a Leaf = (a, Leaf)
+    diffV a@(Node _ va _ _) b@(Node _ vb _ _)
+      | compareValues va vb == EQ && versionsEqual va vb = (Leaf, Leaf)
+      | otherwise = walk (leftMostZip $ toZip a,
+                          leftMostZip $ toZip b)
+               (Leaf, Leaf)
+
+    walk (a@(RBZip (Node _ va _ _) _),
+          b@(RBZip (Node _ vb _ _) _))
+      result@(obsolete, new) =
+      case compareValues va vb of
+        LT -> walk (succZip a, b) (insert compareValues obsolete va, new)
+        GT -> walk (a, succZip b) (obsolete, insert compareValues new vb)
+        EQ -> if versionsEqual va vb then
+                walk (rightParentZip a, rightParentZip b) result
+              else
+                walk (succZip a, succZip b) result
+                -- (insert compareValues obsolete va,
+                --  insert compareValues new vb)
+
+    walk (a@(RBZip Leaf _),
+          b@(RBZip (Node _ vb _ _) _))
+      (obsolete, new) =
+      walk (a, succZip b) (obsolete, insert compareValues new vb)
+
+    walk (a@(RBZip (Node _ va _ _) _),
+          b@(RBZip Leaf _))
+      (obsolete, new) =
+      walk (succZip a, b) (insert compareValues obsolete va, new)
+
+    walk _ result = result
+
+diff :: (a -> a -> Ordering) -> RBTree a -> RBTree a -> (RBTree a, RBTree a)
+diff compareValues a b =
+  (rbSubtract compareValues b a,
+   rbSubtract compareValues a b)
+
+unionVersioned :: (a -> a) -> (a -> a -> Ordering) -> RBTree a -> RBTree a -> RBTree a
+unionVersioned updateVersion compareValues small large =
+  foldr (flip $ insertVersioned updateVersion compareValues) large small
+
+subtractVersioned :: (a -> a) -> (a -> a -> Ordering) -> RBTree a -> RBTree a -> RBTree a
+subtractVersioned updateVersion compareValues subtrahend minuend =
+  foldr (flip $ deleteVersioned updateVersion compareValues) minuend subtrahend
+
+intersectVersioned :: (a -> a) -> (a -> a -> Ordering) -> RBTree a -> RBTree a -> RBTree a
+intersectVersioned updateVersion compareValues small large =
+  foldr visit small small where
+    visit v r = case searchFast compareValues large v of
+      Nothing -> deleteVersioned updateVersion compareValues r v
+      _ -> r
+
+union :: (a -> a -> Ordering) -> RBTree a -> RBTree a -> RBTree a
+union = unionVersioned id
+
+rbSubtract :: (a -> a -> Ordering) -> RBTree a -> RBTree a -> RBTree a
+rbSubtract = subtractVersioned id
+
+intersect :: (a -> a -> Ordering) -> RBTree a -> RBTree a -> RBTree a
+intersect = intersectVersioned id
+
+instance Foldable RBTree where
+  foldr visit seed tree = walk $ leftMostZip $ toZip tree where
+      walk z@(RBZip (Node _ v _ _) _) = visit v $ walk $ succZip z
+      walk _ = seed
+
+instance Eq a => Eq (RBTree a) where
+  a == b = walk (leftMostZip $ toZip a) (leftMostZip $ toZip b) where
+    walk a@(RBZip (Node _ va _ _) _) b@(RBZip (Node _ vb _ _) _) =
+      va == vb && walk (succZip a) (succZip b)
+    walk (RBZip Leaf _) (RBZip Leaf _) = True
+    walk _ _ = False
+
+toList :: RBTree a -> [a]
+toList = foldr (:) []
+
+fromList :: (a -> a -> Ordering) -> [a] -> RBTree a
+fromList compareVersions = foldr (flip $ insert compareVersions) Leaf
