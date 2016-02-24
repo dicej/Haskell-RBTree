@@ -45,6 +45,10 @@ check description prop = do
     putStrLn $ "Use " ++ show (usedSize result) ++ " as the initial size"
     exitFailure
 
+diffV = diffVersioned cellVersionsEqual compareCells
+
+diffN = diff compareCells
+
 main = do
   check "black depth" $ \tree -> let _ = tree :: RBTree Cell in
     case vD tree of
@@ -60,8 +64,7 @@ main = do
           subtractVersioned (updateCellVersion 2) compareCells deleted
           (unionVersioned (updateCellVersion 2) compareCells added base) in
 
-    diffVersioned cellVersionsEqual compareCells base derived
-    == diff compareCells base derived
+    diffV base derived == diffN base derived
 
   check "diff deleted then added" $ \original deleted added ->
     let base = unionVersioned (updateCellVersion 1) compareCells original Leaf
@@ -70,5 +73,4 @@ main = do
           unionVersioned (updateCellVersion 2) compareCells added
           (subtractVersioned (updateCellVersion 2) compareCells deleted base) in
 
-    diffVersioned cellVersionsEqual compareCells base derived
-    == diff compareCells base derived
+    diffV base derived == diffN base derived

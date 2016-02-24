@@ -19,13 +19,15 @@ module Data.Tree.RBTree (
   -- * Delete
   (<<\), delete, deleteOrd, deleteOrdList, deleteVersioned, subtractVersioned,
   intersectVersioned, rbSubtract, intersect,
+  -- * Modify
+  modify, modifyVersioned,
   -- * Search
   (<<?), search, searchOrd, searchFast, searchMax, searchMin,
   searchInterval, searchIntervalOrd,
   -- * Conversion
   toList, fromList,
   -- * Difference
-  diffVersioned, diff,
+  foldrDiffVersioned, diffVersioned, diff,
   -- * Verification
   vD, vR
 )
@@ -203,19 +205,40 @@ insert = insertVersioned id
 -- information can later be used to efficiently calculate the
 -- difference between two versioned trees which share structure.
 insertVersioned :: (a -> a) -> (a -> a -> Ordering) -> RBTree a -> a -> RBTree a
-insertVersioned updateVersion f t v = setBlack . toTree updateVersion . insertFixup updateVersion . (insertRedZip updateVersion f (toZip t)) $ v
+insertVersioned updateVersion f t v =
+  modifyVersioned updateVersion f t v $ const $ Just v
+
+-- |Insert, delete, or modify an element of the tree.
+--
+-- Note that the specified transformation function must not change
+-- the element's ordering relative to the other elements or else the
+-- resulting tree will be corrupted.
+modify :: (b -> a -> Ordering) -> RBTree a -> b -> (Maybe a -> Maybe a) -> RBTree a
+modify = modifyVersioned id
+
+-- |Insert, delete, or modify a versioned element such that the values
+-- of any nodes modified during insertion are also given updated
+-- versions.  This information can later be used to efficiently
+-- calculate the difference between two versioned trees which share
+-- structure.
+--
+-- Note that the specified transformation function must not change
+-- the element's ordering relative to the other elements or else the
+-- resulting tree will be corrupted.
+modifyVersioned :: (a -> a) -> (b -> a -> Ordering) -> RBTree a -> b -> (Maybe a -> Maybe a) -> RBTree a
+modifyVersioned updateVersion f t key transform =
+  case searchZipTrace f (toZip t) key of
+    RBZip Leaf path -> case transform Nothing of
+      Nothing -> t
+      Just new -> setBlack . toTree updateVersion . insertFixup updateVersion
+                  $ RBZip (Node Red (updateVersion new) Leaf Leaf) path
+    z@(RBZip (Node c v l r) path) -> case transform $ Just v of
+      Nothing -> toTree updateVersion . deleteZip updateVersion $ z
+      Just new -> toTree updateVersion $ RBZip (Node c new l r) path
 
 -- |Insert Operator for insertOrd
 (<</) :: (Ord a) => RBTree a -> a -> RBTree a
 t <</ e = insertOrd t e
-
-insertRedZip :: (a -> a) -> (a -> a -> Ordering) -> RBZip a -> a -> RBZip a
-insertRedZip updateVersion _ (RBZip Leaf path) new = RBZip (Node Red (updateVersion new) Leaf Leaf) path
-insertRedZip updateVersion f (RBZip (Node c v l r) path) new =
-  case f new v of
-    GT -> insertRedZip updateVersion f (RBZip r ((Step c v ToRight l):path)) new
-    LT -> insertRedZip updateVersion f (RBZip l ((Step c v ToLeft r):path)) new
-    EQ -> RBZip (Node c (updateVersion new) l r) path
 
 updateNode :: (a -> a) -> RBTree a -> RBTree a
 updateNode updateVersion (Node color v d s) = Node color (updateVersion v) d s
@@ -346,11 +369,9 @@ delete = deleteVersioned id
 -- modified during deletion are given updated versions.  This
 -- information can later be used to efficiently calculate the
 -- difference between two versioned trees which share structure.
-deleteVersioned :: (a -> a) -> (a -> a -> Ordering) -> RBTree a -> a -> RBTree a
-deleteVersioned updateVersion f t v =
-    case searchZip f (toZip t) v of
-        Just z -> toTree updateVersion . deleteZip updateVersion $ z
-        Nothing -> t
+deleteVersioned :: (a -> a) -> (b -> a -> Ordering) -> RBTree a -> b -> RBTree a
+deleteVersioned updateVersion f t key =
+  modifyVersioned updateVersion f t key $ const Nothing
 
 -- |Delete Operator for deleteOrd
 (<<\) :: (Ord a) => RBTree a -> a -> RBTree a
@@ -446,47 +467,53 @@ vR (Node Red _ l r) =
 -- extremely fast.
 --
 -- Note that this will only work correctly if the trees have been
--- updated using only insertVersioned and deleteVersioned.
+-- updated using only {insert|delete|modify}Versioned.
+foldrDiffVersioned :: (a -> a -> Bool) -> (a -> a -> Ordering) -> (Maybe a -> Maybe a -> b -> b) -> b -> RBTree a -> RBTree a -> b
+foldrDiffVersioned versionsEqual compareValues visit seed oldTree newTree =
+  diffV oldTree newTree where
+    diffV a Leaf = start a Leaf
+    diffV Leaf b = start Leaf b
+    diffV a@(Node _ va _ _) b@(Node _ vb _ _)
+      | compareValues va vb == EQ && versionsEqual va vb = seed
+      | otherwise = start a b
+
+    -- todo: could save a bit of time by starting only as far left as
+    -- the leftmost changed nodes:
+    start a b = walk (leftMostZip $ toZip a) (leftMostZip $ toZip b)
+
+    walk a@(RBZip (Node _ va _ _) _) b@(RBZip (Node _ vb _ _) _) =
+      case compareValues va vb of
+        LT -> visit (Just va) Nothing $ walk (succZip a) b
+        GT -> visit Nothing (Just vb) $ walk a (succZip b)
+        EQ -> if versionsEqual va vb then
+                walk (rightParentZip a) (rightParentZip b)
+              else
+                visit (Just va) (Just vb) $ walk (succZip a) (succZip b)
+
+    walk a@(RBZip Leaf _) b@(RBZip (Node _ vb _ _) _) =
+      visit Nothing (Just vb) $ walk a (succZip b)
+
+    walk a@(RBZip (Node _ va _ _) _) b@(RBZip Leaf _) =
+      visit (Just va) Nothing $ walk (succZip a) b
+
+    walk _ _ = seed
+
+-- |Uses \'foldrDiffVersioned\' to compute the difference between two
+-- versioned trees.
 --
 -- The return value is a tuple \'(obsolete, new)\' where \'obsolete\'
 -- is a tree containing all elements present in the first tree but not
 -- the second tree and the \'new\' is a tree containing all the
 -- elements present in the second tree but not the first tree.
-diffVersioned :: Show a => (a -> a -> Bool) -> (a -> a -> Ordering) -> RBTree a -> RBTree a -> (RBTree a, RBTree a)
+diffVersioned :: (a -> a -> Bool) -> (a -> a -> Ordering) -> RBTree a -> RBTree a -> (RBTree a, RBTree a)
 diffVersioned versionsEqual compareValues oldTree newTree =
-  diffV oldTree newTree where
-    diffV Leaf b = (Leaf, b)
-    diffV a Leaf = (a, Leaf)
-    diffV a@(Node _ va _ _) b@(Node _ vb _ _)
-      | compareValues va vb == EQ && versionsEqual va vb = (Leaf, Leaf)
-      | otherwise = walk (leftMostZip $ toZip a,
-                          leftMostZip $ toZip b)
-               (Leaf, Leaf)
-
-    walk (a@(RBZip (Node _ va _ _) _),
-          b@(RBZip (Node _ vb _ _) _))
-      result@(obsolete, new) =
-      case compareValues va vb of
-        LT -> walk (succZip a, b) (insert compareValues obsolete va, new)
-        GT -> walk (a, succZip b) (obsolete, insert compareValues new vb)
-        EQ -> if versionsEqual va vb then
-                walk (rightParentZip a, rightParentZip b) result
-              else
-                walk (succZip a, succZip b) result
-                -- (insert compareValues obsolete va,
-                --  insert compareValues new vb)
-
-    walk (a@(RBZip Leaf _),
-          b@(RBZip (Node _ vb _ _) _))
-      (obsolete, new) =
-      walk (a, succZip b) (obsolete, insert compareValues new vb)
-
-    walk (a@(RBZip (Node _ va _ _) _),
-          b@(RBZip Leaf _))
-      (obsolete, new) =
-      walk (succZip a, b) (insert compareValues obsolete va, new)
-
-    walk _ result = result
+  foldrDiffVersioned versionsEqual compareValues
+  (\maybeA maybeB result@(as, bs) ->
+    case (maybeA, maybeB) of
+      (Just a, Nothing) -> (insert compareValues as a, bs)
+      (Nothing, Just b) -> (as, insert compareValues bs b)
+      _ -> result)
+  (Leaf, Leaf) oldTree newTree
 
 diff :: (a -> a -> Ordering) -> RBTree a -> RBTree a -> (RBTree a, RBTree a)
 diff compareValues a b =
