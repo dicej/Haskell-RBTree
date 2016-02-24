@@ -26,3 +26,4 @@ test-suite tests
   main-is:             Tests.hs
   build-depends:       base, QuickCheck, tf-random
   default-language:    Haskell2010
+  ghc-options:         -Wall

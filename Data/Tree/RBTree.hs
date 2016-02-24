@@ -551,8 +551,8 @@ instance Foldable RBTree where
 
 instance Eq a => Eq (RBTree a) where
   a == b = walk (leftMostZip $ toZip a) (leftMostZip $ toZip b) where
-    walk a@(RBZip (Node _ va _ _) _) b@(RBZip (Node _ vb _ _) _) =
-      va == vb && walk (succZip a) (succZip b)
+    walk a'@(RBZip (Node _ va _ _) _) b'@(RBZip (Node _ vb _ _) _) =
+      va == vb && walk (succZip a') (succZip b')
     walk (RBZip Leaf _) (RBZip Leaf _) = True
     walk _ _ = False
 
